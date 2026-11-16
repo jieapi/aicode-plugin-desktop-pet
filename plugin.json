@@ -5,7 +5,7 @@
     "default": "Desktop Pet",
     "zh-CN": "桌面宠物"
   },
-  "version": "1.0.0",
+  "version": "1.1.0",
   "publisher": "jieapi",
   "repository": "https://github.com/jieapi/aicode-plugin-desktop-pet",
   "description": {
@@ -28,7 +28,7 @@
       "surfaces": [
         {
           "id": "pet",
-          "page": "pages/pet.html",
+          "page": "dist/pages/pet.html",
           "width": 240,
           "height": 320,
           "draggable": true,
@@ -68,6 +68,6 @@
         "handler": "hooks.agentRunFinished"
       }
     ],
-    "configPage": "pages/config.html"
+    "configPage": "dist/pages/config.html"
   }
 }

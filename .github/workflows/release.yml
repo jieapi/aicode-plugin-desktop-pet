@@ -1,0 +1,168 @@
+name: Plugin Release
+
+# 打 v* tag 时触发：类型检查 → 构建运行时与页面 → 打包 zip → 创建 GitHub Release 并上传资产。
+# 也可在 Actions 页面手动触发：只构建并上传 artifact，不创建 Release（避免污染版本列表）。
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+# 发版流程不自动取消，避免上传到一半被打断。
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write   # 创建 Release 与上传资产需要写权限
+
+jobs:
+  release:
+    name: Build & Release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # changelog 要按 tag 区间取提交，浅克隆拿不到历史 tag。
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # 宿主按 plugin.json 加载内容，版本号与 tag 必须一致，
+      # 否则 Release 资产名和插件详情里显示的版本会对不上。
+      - name: Read manifest & verify tag
+        id: manifest
+        run: |
+          set -e
+          plugin_id=$(node -p "require('./plugin.json').id")
+          version=$(node -p "require('./plugin.json').version")
+          echo "id=$plugin_id" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "插件: $plugin_id@$version"
+
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            tag_ver="${GITHUB_REF_NAME#v}"
+            if [[ "$tag_ver" != "$version" ]]; then
+              echo "::error::tag ($GITHUB_REF_NAME) 与 plugin.json 的 version ($version) 不一致"
+              exit 1
+            fi
+            echo "✓ tag 与 plugin.json 版本一致: $version"
+          else
+            echo "手动触发，跳过 tag 校验"
+          fi
+
+      # package-lock.json 锁定了全部依赖（含 @jieapi/plugin-sdk），npm ci 可复现安装。
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build runtime & pages
+        run: npm run build
+
+      # 只带清单引用到的运行文件；src/、node_modules、.git 都不进包。
+      - name: Package plugin zip
+        run: |
+          set -e
+          plugin_id='${{ steps.manifest.outputs.id }}'
+          version='${{ steps.manifest.outputs.version }}'
+          out="dist-zip/${plugin_id}_${version}.zip"
+          mkdir -p dist-zip
+          zip -r "$out" plugin.json dist icons
+
+          # 安装限制（见插件文档「打包、导入与排错」）：压缩包 16 MiB、512 个文件、单文件 4 MiB。
+          bytes=$(stat -c%s "$out")
+          files=$(unzip -l "$out" | tail -1 | awk '{print $2}')
+          echo "包大小: $bytes bytes"
+          echo "文件数: $files"
+          if (( bytes > 16777216 )); then
+            echo "::error::压缩包超过 16 MiB 上限"
+            exit 1
+          fi
+          if (( files > 512 )); then
+            echo "::error::文件数超过 512 上限"
+            exit 1
+          fi
+          # 排除 unzip 结尾的汇总行（形如 "  61592   16 files"），否则总量会被当成单个文件。
+          biggest=$(unzip -l "$out" | awk 'NR>3 && $1 ~ /^[0-9]+$/ && $NF != "files" {print $1}' | sort -rn | head -1)
+          if (( biggest > 4194304 )); then
+            echo "::error::存在超过 4 MiB 的单个文件"
+            exit 1
+          fi
+          unzip -l "$out"
+
+      # 手动触发也能拿到产物，方便先在真机上验证再打 tag。
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.manifest.outputs.id }}_${{ steps.manifest.outputs.version }}
+          path: dist-zip/*.zip
+          if-no-files-found: error
+
+      # generate_release_notes 只列 merged PR，本仓库直接在 main 上提交，所以用 git log 生成。
+      - name: Generate changelog
+        id: changelog
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          set -e
+          cur_tag="${GITHUB_REF_NAME}"
+          prev_tag=$(git tag --sort=-creatordate | grep -vE "^${cur_tag}$" | head -1 || true)
+          if [[ -z "$prev_tag" ]]; then
+            echo "无历史 tag，列出最近 30 条提交"
+            log=$(git log --oneline --no-decorate -30)
+          else
+            echo "生成 ${prev_tag}..${cur_tag} 的 changelog"
+            log=$(git log --oneline --no-decorate "${prev_tag}..HEAD")
+          fi
+
+          delimiter="EOF_$(date +%s)"
+          {
+            echo "body<<${delimiter}"
+            echo "## What's Changed"
+            echo ""
+            if [[ -z "$log" ]]; then
+              echo "- 无新增提交（与上次发布同一提交）"
+            else
+              while IFS= read -r line; do
+                sha=$(echo "$line" | cut -d' ' -f1)
+                msg=$(echo "$line" | cut -d' ' -f2-)
+                echo "- ${msg} (${sha})"
+              done <<< "$log"
+            fi
+            echo ""
+            if [[ -n "$prev_tag" ]]; then
+              echo "**Full Changelog**: https://github.com/${{ github.repository }}/compare/${prev_tag}...${cur_tag}"
+            fi
+            echo "${delimiter}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Detect prerelease
+        id: prerelease
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          if [[ "$GITHUB_REF_NAME" =~ -(rc|dev|beta|alpha)([.0-9]*)?$ ]]; then
+            echo "is_prerelease=true" >> "$GITHUB_OUTPUT"
+            echo "检测到预发布后缀，标记为 pre-release"
+          else
+            echo "is_prerelease=false" >> "$GITHUB_OUTPUT"
+            echo "正式版"
+          fi
+
+      - name: Create GitHub Release & upload asset
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ steps.manifest.outputs.id }} ${{ github.ref_name }}
+          body: ${{ steps.changelog.outputs.body }}
+          prerelease: ${{ steps.prerelease.outputs.is_prerelease }}
+          # 资产名约定 {id}_{version}.zip，与插件索引里的引用保持一致。
+          files: dist-zip/*.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
