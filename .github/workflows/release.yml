@@ -1,11 +1,12 @@
 name: Plugin Release
 
-# 打 v* tag 时触发：类型检查 → 构建运行时与页面 → 打包 zip → 创建 GitHub Release 并上传资产。
+# 打版本号 tag（如 1.1.0，不带 v 前缀）时触发：类型检查 → 构建运行时与页面 → 打包 zip → 创建 GitHub Release 并上传资产。
 # 也可在 Actions 页面手动触发：只构建并上传 artifact，不创建 Release（避免污染版本列表）。
 on:
   push:
     tags:
-      - 'v*'
+      # tag 只写版本号，如 1.1.0 / 1.2.0-rc1；v1.1.0 这类命名会被下面的版本校验拒绝。
+      - '[0-9]*'
   workflow_dispatch:
 
 # 发版流程不自动取消，避免上传到一半被打断。
@@ -33,8 +34,8 @@ jobs:
         with:
           node-version: '20'
 
-      # 宿主按 plugin.json 加载内容，版本号与 tag 必须一致，
-      # 否则 Release 资产名和插件详情里显示的版本会对不上。
+      # 宿主按 plugin.json 的 version 展示插件，Release 资产名也取自它。
+      # tag 必须与它逐字符相同（只写版本号，不带 v 前缀），否则拒绝发版。
       - name: Read manifest & verify tag
         id: manifest
         run: |
@@ -46,9 +47,9 @@ jobs:
           echo "插件: $plugin_id@$version"
 
           if [[ "$GITHUB_REF" == refs/tags/* ]]; then
-            tag_ver="${GITHUB_REF_NAME#v}"
-            if [[ "$tag_ver" != "$version" ]]; then
-              echo "::error::tag ($GITHUB_REF_NAME) 与 plugin.json 的 version ($version) 不一致"
+            tag="$GITHUB_REF_NAME"
+            if [[ "$tag" != "$version" ]]; then
+              echo "::error::tag ($tag) 与 plugin.json 的 version ($version) 不一致。tag 只写版本号，例如 $version"
               exit 1
             fi
             echo "✓ tag 与 plugin.json 版本一致: $version"
@@ -108,7 +109,7 @@ jobs:
       # generate_release_notes 只列 merged PR，本仓库直接在 main 上提交，所以用 git log 生成。
       - name: Generate changelog
         id: changelog
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/')
         run: |
           set -e
           cur_tag="${GITHUB_REF_NAME}"
@@ -144,7 +145,7 @@ jobs:
 
       - name: Detect prerelease
         id: prerelease
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/')
         run: |
           if [[ "$GITHUB_REF_NAME" =~ -(rc|dev|beta|alpha)([.0-9]*)?$ ]]; then
             echo "is_prerelease=true" >> "$GITHUB_OUTPUT"
@@ -155,7 +156,7 @@ jobs:
           fi
 
       - name: Create GitHub Release & upload asset
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
