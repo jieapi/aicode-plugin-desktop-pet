@@ -1,3 +1,7 @@
+# 构建产物：由 npm run build 生成（esbuild 打运行时、Vite 打页面），不跟踪。
+# Vite 的 assets 文件名带内容哈希，每次构建都会变。
+dist/
+
 node_modules/
 dist-zip/
 *.log
